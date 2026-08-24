@@ -1,0 +1,28 @@
+name: Weekly Social Analytics
+
+on:
+  schedule:
+    - cron: '0 7 * * 0'   # Every Sunday 07:00 UTC (8am WAT)
+  workflow_dispatch:
+
+jobs:
+  run-analytics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create service account file
+        run: echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > service_account.json
+
+      - name: Run analytics
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+        run: python weekly_analytics.py
