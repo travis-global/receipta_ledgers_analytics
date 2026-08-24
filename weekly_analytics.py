@@ -16,7 +16,6 @@ BASE_URL = f"https://graph.facebook.com/{GRAPH_VERSION}"
 
 # ====================== DATE RANGE ======================
 def get_previous_week():
-    """Returns previous Monday and Saturday (inclusive)"""
     today = datetime.now(timezone.utc).date()
     days_since_monday = today.weekday()  # 0=Mon ... 6=Sun
     last_saturday = today - timedelta(days=(days_since_monday + 1) % 7)
@@ -33,12 +32,12 @@ def graph_get(endpoint, params=None):
     return r.json()
 
 def get_page_insights(since, until):
-    """Facebook Page level insights - using current metrics after June 2026 deprecation"""
+    """Facebook Page insights (post June 2026 metrics)"""
     metrics = [
-        "page_media_view",                  # replaces old impressions
-        "page_total_media_view_unique",     # replaces old reach
+        "page_media_view",
+        "page_total_media_view_unique",
         "page_post_engagements",
-        "page_follows",                     # replaces page_fans
+        "page_follows",
         "page_views_total",
     ]
     try:
@@ -59,8 +58,9 @@ def get_page_insights(since, until):
         return []
 
 def get_ig_account_insights(since, until):
-    """Instagram account level insights"""
-    metrics = "impressions,reach,profile_views,follower_count"
+    """Instagram account insights - only currently allowed metrics"""
+    # Valid metrics from the error message
+    metrics = "reach,follower_count,profile_views,total_interactions,accounts_engaged"
     try:
         data = graph_get(
             f"{IG_USER_ID}/insights",
@@ -112,9 +112,8 @@ def get_ig_media(since, until):
 
 def get_post_insights(post_id, is_instagram=False):
     if is_instagram:
-        metrics = "impressions,reach,likes,comments,shares,saved,plays"
+        metrics = "reach,likes,comments,shares,saved,plays,total_interactions"
     else:
-        # Using newer post metrics where possible
         metrics = "post_media_view,post_total_media_view_unique,post_engaged_users,post_clicks"
     try:
         data = graph_get(f"{post_id}/insights", {"metric": metrics})
@@ -153,9 +152,11 @@ def get_worksheet(name):
 
 def append_rows(sheet_name, rows):
     if not rows:
+        print(f"No rows to write to {sheet_name}")
         return
     ws = get_worksheet(sheet_name)
     ws.append_rows(rows, value_input_option="USER_ENTERED")
+    print(f"Wrote {len(rows)} rows to {sheet_name}")
 
 # ====================== MAIN ======================
 def main():
@@ -183,18 +184,17 @@ def main():
     # Instagram
     ig_insights = get_ig_account_insights(week_start, week_end)
     ig_reach = sum_metric(ig_insights, "reach")
-    ig_impressions = sum_metric(ig_insights, "impressions")
     ig_profile_visits = sum_metric(ig_insights, "profile_views")
     ig_followers = safe_get(ig_insights, "follower_count")
+    ig_engagements = sum_metric(ig_insights, "total_interactions")
 
     page_rows.append([
         str(week_start), str(week_end), "Instagram",
-        ig_reach, ig_impressions, ig_profile_visits, ig_followers,
-        "", "", "", ""
+        ig_reach, "", ig_profile_visits, ig_followers,
+        ig_engagements, "", "", ""
     ])
 
     append_rows("Weekly_Page_Summary", page_rows)
-    print("Page summary written")
 
     # ---------- POST LEVEL ----------
     post_rows = []
@@ -224,7 +224,6 @@ def main():
     for media in get_ig_media(week_start, week_end):
         insights = get_post_insights(media["id"], is_instagram=True)
         reach = safe_get(insights, "reach")
-        impressions = safe_get(insights, "impressions")
         likes = media.get("like_count") or safe_get(insights, "likes")
         comments = media.get("comments_count") or safe_get(insights, "comments")
         shares = safe_get(insights, "shares")
@@ -237,12 +236,11 @@ def main():
         post_rows.append([
             str(week_start), "Instagram", media["id"],
             media.get("timestamp", "")[:10], media.get("media_type", "IMAGE"),
-            caption, reach, impressions, likes, comments, shares, saves,
+            caption, reach, "", likes, comments, shares, saves,
             video_views, eng_rate, "", media.get("permalink", "")
         ])
 
     append_rows("Post_Performance", post_rows)
-    print(f"Wrote {len(post_rows)} posts")
     print("Done!")
 
 if __name__ == "__main__":
