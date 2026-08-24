@@ -57,12 +57,12 @@ def get_page_insights(since, until):
 def get_ig_account_insights(since, until):
     results = []
 
-    # Metrics that work with metric_type=total_value
+    # Metrics that require metric_type=total_value
     try:
         data = graph_get(
             f"{IG_USER_ID}/insights",
             {
-                "metric": "reach,profile_views,total_interactions",
+                "metric": "reach,profile_views,total_interactions,accounts_engaged",
                 "period": "day",
                 "metric_type": "total_value",
                 "since": since.strftime("%Y-%m-%d"),
@@ -73,7 +73,7 @@ def get_ig_account_insights(since, until):
     except Exception as e:
         print(f"IG total_value metrics error: {e}")
 
-    # follower_count works better without metric_type or with time_series
+    # follower_count (does not like total_value)
     try:
         data = graph_get(
             f"{IG_USER_ID}/insights",
@@ -89,6 +89,7 @@ def get_ig_account_insights(since, until):
         print(f"IG follower_count error: {e}")
 
     return results
+
 def get_fb_posts(since, until):
     try:
         data = graph_get(
@@ -110,7 +111,7 @@ def get_ig_media(since, until):
         data = graph_get(
             f"{IG_USER_ID}/media",
             {
-                "fields": "id,caption,timestamp,permalink,media_type,like_count,comments_count",
+                "fields": "id,caption,timestamp,permalink,media_type,like_count,comments_count,media_product_type",
                 "since": since.strftime("%Y-%m-%d"),
                 "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
                 "limit": 50,
@@ -125,7 +126,7 @@ def get_post_insights(post_id, is_instagram=False):
     if is_instagram:
         metrics = "reach,likes,comments,shares,saved,plays,total_interactions"
     else:
-        metrics = "post_media_view,post_total_media_view_unique,post_engaged_users,post_clicks"
+        metrics = "post_media_view,post_total_media_view_unique,post_engaged_users,post_clicks,post_reactions_by_type_total"
     try:
         data = graph_get(f"{post_id}/insights", {"metric": metrics})
         return data.get("data", [])
@@ -137,7 +138,6 @@ def sum_metric(insights_list, metric_name):
     total = 0
     for item in insights_list:
         if item.get("name") == metric_name:
-            # Handle both time_series and total_value responses
             if "total_value" in item:
                 val = item["total_value"].get("value", 0)
                 total += val or 0
@@ -167,7 +167,6 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 def get_or_create_worksheet(sh, preferred_name, fallback_index=0):
-    """Try exact name first, otherwise use sheet by index"""
     try:
         return sh.worksheet(preferred_name)
     except gspread.WorksheetNotFound:
@@ -192,8 +191,6 @@ def main():
 
     gc = get_gspread_client()
     sh = gc.open_by_key(SPREADSHEET_ID)
-
-    # Show available sheets for debugging
     print("Available worksheets:", [ws.title for ws in sh.worksheets()])
 
     # ---------- PAGE LEVEL ----------
@@ -211,7 +208,7 @@ def main():
     page_rows.append([
         str(week_start), str(week_end), "Facebook",
         fb_reach, fb_impressions, fb_profile_visits, fb_followers,
-        fb_engagements, fb_eng_rate, "", ""
+        fb_engagements, fb_eng_rate, "", "", ""
     ])
 
     # Instagram
@@ -220,11 +217,12 @@ def main():
     ig_profile_visits = sum_metric(ig_insights, "profile_views")
     ig_followers = safe_get(ig_insights, "follower_count")
     ig_engagements = sum_metric(ig_insights, "total_interactions")
+    ig_accounts_engaged = sum_metric(ig_insights, "accounts_engaged")
 
     page_rows.append([
         str(week_start), str(week_end), "Instagram",
         ig_reach, "", ig_profile_visits, ig_followers,
-        ig_engagements, "", "", ""
+        ig_engagements, "", "", ig_accounts_engaged, ""
     ])
 
     append_rows(sh, "Weekly_Page_Summary", page_rows, fallback_index=0)
@@ -232,6 +230,7 @@ def main():
     # ---------- POST LEVEL ----------
     post_rows = []
 
+    # Facebook posts
     for post in get_fb_posts(week_start, week_end):
         insights = get_post_insights(post["id"], is_instagram=False)
         reach = safe_get(insights, "post_total_media_view_unique")
@@ -240,7 +239,7 @@ def main():
         clicks = safe_get(insights, "post_clicks")
         eng_rate = round((engagements / reach * 100), 2) if reach else 0
 
-        caption = (post.get("message") or "")[:100]
+        caption = (post.get("message") or "")[:120]
         post_type = "post"
         if post.get("attachments", {}).get("data"):
             post_type = post["attachments"]["data"][0].get("media_type", "post")
@@ -252,6 +251,7 @@ def main():
             eng_rate, clicks, post.get("permalink_url", "")
         ])
 
+    # Instagram media
     for media in get_ig_media(week_start, week_end):
         insights = get_post_insights(media["id"], is_instagram=True)
         reach = safe_get(insights, "reach")
@@ -263,16 +263,17 @@ def main():
         eng = (likes or 0) + (comments or 0) + (shares or 0) + (saves or 0)
         eng_rate = round((eng / reach * 100), 2) if reach else 0
 
-        caption = (media.get("caption") or "")[:100]
+        caption = (media.get("caption") or "")[:120]
+        post_type = media.get("media_product_type") or media.get("media_type", "IMAGE")
+
         post_rows.append([
             str(week_start), "Instagram", media["id"],
-            media.get("timestamp", "")[:10], media.get("media_type", "IMAGE"),
-            caption, reach, "", likes, comments, shares, saves,
+            media.get("timestamp", "")[:10], post_type, caption,
+            reach, "", likes, comments, shares, saves,
             video_views, eng_rate, "", media.get("permalink", "")
         ])
 
     append_rows(sh, "Post_Performance", post_rows, fallback_index=1)
-
     print("Done!")
 
 if __name__ == "__main__":
