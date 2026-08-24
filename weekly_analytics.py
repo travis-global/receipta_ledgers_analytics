@@ -17,7 +17,7 @@ BASE_URL = f"https://graph.facebook.com/{GRAPH_VERSION}"
 # ====================== DATE RANGE ======================
 def get_previous_week():
     today = datetime.now(timezone.utc).date()
-    days_since_monday = today.weekday()  # 0=Mon ... 6=Sun
+    days_since_monday = today.weekday()
     last_saturday = today - timedelta(days=(days_since_monday + 1) % 7)
     last_monday = last_saturday - timedelta(days=5)
     return last_monday, last_saturday
@@ -32,7 +32,6 @@ def graph_get(endpoint, params=None):
     return r.json()
 
 def get_page_insights(since, until):
-    """Facebook Page insights (post June 2026 metrics)"""
     metrics = [
         "page_media_view",
         "page_total_media_view_unique",
@@ -51,30 +50,30 @@ def get_page_insights(since, until):
             },
         )
         return data.get("data", [])
-    except requests.exceptions.HTTPError as e:
+    except Exception as e:
         print(f"Facebook Page insights error: {e}")
-        if e.response is not None:
-            print("Response:", e.response.text)
         return []
 
 def get_ig_account_insights(since, until):
-    """Instagram account insights - only currently allowed metrics"""
-    # Valid metrics from the error message
-    metrics = "reach,follower_count,profile_views,total_interactions,accounts_engaged"
+    """
+    Instagram requires metric_type=total_value for most modern metrics.
+    We request only the most reliable ones.
+    """
     try:
         data = graph_get(
             f"{IG_USER_ID}/insights",
             {
-                "metric": metrics,
+                "metric": "reach,follower_count,profile_views,total_interactions",
                 "period": "day",
+                "metric_type": "total_value",
                 "since": since.strftime("%Y-%m-%d"),
                 "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
             },
         )
         return data.get("data", [])
-    except requests.exceptions.HTTPError as e:
+    except Exception as e:
         print(f"Instagram account insights error: {e}")
-        if e.response is not None:
+        if hasattr(e, "response") and e.response is not None:
             print("Response:", e.response.text)
         return []
 
@@ -126,42 +125,64 @@ def sum_metric(insights_list, metric_name):
     total = 0
     for item in insights_list:
         if item.get("name") == metric_name:
-            for v in item.get("values", []):
-                val = v.get("value", 0)
-                if isinstance(val, dict):
-                    total += sum(val.values())
-                else:
-                    total += val or 0
+            # Handle both time_series and total_value responses
+            if "total_value" in item:
+                val = item["total_value"].get("value", 0)
+                total += val or 0
+            else:
+                for v in item.get("values", []):
+                    val = v.get("value", 0)
+                    if isinstance(val, dict):
+                        total += sum(val.values())
+                    else:
+                        total += val or 0
     return total
 
 def safe_get(insights, name, default=0):
     for item in insights:
         if item.get("name") == name:
+            if "total_value" in item:
+                return item["total_value"].get("value", default)
             values = item.get("values", [])
             if values:
                 return values[-1].get("value", default)
     return default
 
 # ====================== GOOGLE SHEETS ======================
-def get_worksheet(name):
+def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SPREADSHEET_ID)
-    return sh.worksheet(name)
+    return gspread.authorize(creds)
 
-def append_rows(sheet_name, rows):
+def get_or_create_worksheet(sh, preferred_name, fallback_index=0):
+    """Try exact name first, otherwise use sheet by index"""
+    try:
+        return sh.worksheet(preferred_name)
+    except gspread.WorksheetNotFound:
+        print(f"Worksheet '{preferred_name}' not found. Using sheet index {fallback_index}")
+        worksheets = sh.worksheets()
+        if len(worksheets) > fallback_index:
+            return worksheets[fallback_index]
+        raise
+
+def append_rows(sh, preferred_name, rows, fallback_index=0):
     if not rows:
-        print(f"No rows to write to {sheet_name}")
+        print(f"No rows to write for {preferred_name}")
         return
-    ws = get_worksheet(sheet_name)
+    ws = get_or_create_worksheet(sh, preferred_name, fallback_index)
     ws.append_rows(rows, value_input_option="USER_ENTERED")
-    print(f"Wrote {len(rows)} rows to {sheet_name}")
+    print(f"Wrote {len(rows)} rows to '{ws.title}'")
 
 # ====================== MAIN ======================
 def main():
     week_start, week_end = get_previous_week()
     print(f"Processing week: {week_start} → {week_end}")
+
+    gc = get_gspread_client()
+    sh = gc.open_by_key(SPREADSHEET_ID)
+
+    # Show available sheets for debugging
+    print("Available worksheets:", [ws.title for ws in sh.worksheets()])
 
     # ---------- PAGE LEVEL ----------
     page_rows = []
@@ -194,12 +215,11 @@ def main():
         ig_engagements, "", "", ""
     ])
 
-    append_rows("Weekly_Page_Summary", page_rows)
+    append_rows(sh, "Weekly_Page_Summary", page_rows, fallback_index=0)
 
     # ---------- POST LEVEL ----------
     post_rows = []
 
-    # Facebook posts
     for post in get_fb_posts(week_start, week_end):
         insights = get_post_insights(post["id"], is_instagram=False)
         reach = safe_get(insights, "post_total_media_view_unique")
@@ -220,7 +240,6 @@ def main():
             eng_rate, clicks, post.get("permalink_url", "")
         ])
 
-    # Instagram media
     for media in get_ig_media(week_start, week_end):
         insights = get_post_insights(media["id"], is_instagram=True)
         reach = safe_get(insights, "reach")
@@ -240,7 +259,8 @@ def main():
             video_views, eng_rate, "", media.get("permalink", "")
         ])
 
-    append_rows("Post_Performance", post_rows)
+    append_rows(sh, "Post_Performance", post_rows, fallback_index=1)
+
     print("Done!")
 
 if __name__ == "__main__":
