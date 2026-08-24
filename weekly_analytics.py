@@ -1,6 +1,6 @@
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from google.oauth2.service_account import Credentials
 import gspread
 
@@ -17,8 +17,7 @@ BASE_URL = f"https://graph.facebook.com/{GRAPH_VERSION}"
 # ====================== DATE RANGE ======================
 def get_previous_week():
     """Returns previous Monday and Saturday (inclusive)"""
-    today = datetime.utcnow().date()
-    # If today is Sunday (weekday 6), previous week is Mon-Sat just ended
+    today = datetime.now(timezone.utc).date()
     days_since_monday = today.weekday()  # 0=Mon ... 6=Sun
     last_saturday = today - timedelta(days=(days_since_monday + 1) % 7)
     last_monday = last_saturday - timedelta(days=5)
@@ -34,68 +33,89 @@ def graph_get(endpoint, params=None):
     return r.json()
 
 def get_page_insights(since, until):
-    """Facebook Page level insights"""
+    """Facebook Page level insights - using current metrics after June 2026 deprecation"""
     metrics = [
-        "page_impressions",
-        "page_impressions_unique",
+        "page_media_view",                  # replaces old impressions
+        "page_total_media_view_unique",     # replaces old reach
         "page_post_engagements",
-        "page_fans",
+        "page_follows",                     # replaces page_fans
         "page_views_total",
     ]
-    data = graph_get(
-        f"{FB_PAGE_ID}/insights",
-        {
-            "metric": ",".join(metrics),
-            "period": "day",
-            "since": since.strftime("%Y-%m-%d"),
-            "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
-        },
-    )
-    return data.get("data", [])
+    try:
+        data = graph_get(
+            f"{FB_PAGE_ID}/insights",
+            {
+                "metric": ",".join(metrics),
+                "period": "day",
+                "since": since.strftime("%Y-%m-%d"),
+                "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
+            },
+        )
+        return data.get("data", [])
+    except requests.exceptions.HTTPError as e:
+        print(f"Facebook Page insights error: {e}")
+        if e.response is not None:
+            print("Response:", e.response.text)
+        return []
 
 def get_ig_account_insights(since, until):
     """Instagram account level insights"""
     metrics = "impressions,reach,profile_views,follower_count"
-    data = graph_get(
-        f"{IG_USER_ID}/insights",
-        {
-            "metric": metrics,
-            "period": "day",
-            "since": since.strftime("%Y-%m-%d"),
-            "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
-        },
-    )
-    return data.get("data", [])
+    try:
+        data = graph_get(
+            f"{IG_USER_ID}/insights",
+            {
+                "metric": metrics,
+                "period": "day",
+                "since": since.strftime("%Y-%m-%d"),
+                "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
+            },
+        )
+        return data.get("data", [])
+    except requests.exceptions.HTTPError as e:
+        print(f"Instagram account insights error: {e}")
+        if e.response is not None:
+            print("Response:", e.response.text)
+        return []
 
 def get_fb_posts(since, until):
-    data = graph_get(
-        f"{FB_PAGE_ID}/posts",
-        {
-            "fields": "id,message,created_time,permalink_url,attachments{media_type}",
-            "since": since.strftime("%Y-%m-%d"),
-            "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
-            "limit": 50,
-        },
-    )
-    return data.get("data", [])
+    try:
+        data = graph_get(
+            f"{FB_PAGE_ID}/posts",
+            {
+                "fields": "id,message,created_time,permalink_url,attachments{media_type}",
+                "since": since.strftime("%Y-%m-%d"),
+                "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "limit": 50,
+            },
+        )
+        return data.get("data", [])
+    except Exception as e:
+        print(f"Error fetching FB posts: {e}")
+        return []
 
 def get_ig_media(since, until):
-    data = graph_get(
-        f"{IG_USER_ID}/media",
-        {
-            "fields": "id,caption,timestamp,permalink,media_type,like_count,comments_count",
-            "since": since.strftime("%Y-%m-%d"),
-            "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
-            "limit": 50,
-        },
-    )
-    return data.get("data", [])
+    try:
+        data = graph_get(
+            f"{IG_USER_ID}/media",
+            {
+                "fields": "id,caption,timestamp,permalink,media_type,like_count,comments_count",
+                "since": since.strftime("%Y-%m-%d"),
+                "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "limit": 50,
+            },
+        )
+        return data.get("data", [])
+    except Exception as e:
+        print(f"Error fetching IG media: {e}")
+        return []
 
 def get_post_insights(post_id, is_instagram=False):
     if is_instagram:
         metrics = "impressions,reach,likes,comments,shares,saved,plays"
     else:
-        metrics = "post_impressions,post_impressions_unique,post_engaged_users,post_clicks,post_reactions_by_type_total"
+        # Using newer post metrics where possible
+        metrics = "post_media_view,post_total_media_view_unique,post_engaged_users,post_clicks"
     try:
         data = graph_get(f"{post_id}/insights", {"metric": metrics})
         return data.get("data", [])
@@ -147,17 +167,17 @@ def main():
 
     # Facebook
     fb_insights = get_page_insights(week_start, week_end)
-    fb_reach = sum_metric(fb_insights, "page_impressions_unique")
-    fb_impressions = sum_metric(fb_insights, "page_impressions")
+    fb_reach = sum_metric(fb_insights, "page_total_media_view_unique")
+    fb_impressions = sum_metric(fb_insights, "page_media_view")
     fb_engagements = sum_metric(fb_insights, "page_post_engagements")
-    fb_followers = safe_get(fb_insights, "page_fans")
+    fb_followers = safe_get(fb_insights, "page_follows")
     fb_profile_visits = sum_metric(fb_insights, "page_views_total")
     fb_eng_rate = round((fb_engagements / fb_reach * 100), 2) if fb_reach else 0
 
     page_rows.append([
         str(week_start), str(week_end), "Facebook",
         fb_reach, fb_impressions, fb_profile_visits, fb_followers,
-        fb_engagements, fb_eng_rate, "", ""  # Link_Clicks & Notes empty for now
+        fb_engagements, fb_eng_rate, "", ""
     ])
 
     # Instagram
@@ -166,7 +186,7 @@ def main():
     ig_impressions = sum_metric(ig_insights, "impressions")
     ig_profile_visits = sum_metric(ig_insights, "profile_views")
     ig_followers = safe_get(ig_insights, "follower_count")
-    # Engagements not directly available at account level in the same way
+
     page_rows.append([
         str(week_start), str(week_end), "Instagram",
         ig_reach, ig_impressions, ig_profile_visits, ig_followers,
@@ -182,8 +202,8 @@ def main():
     # Facebook posts
     for post in get_fb_posts(week_start, week_end):
         insights = get_post_insights(post["id"], is_instagram=False)
-        reach = safe_get(insights, "post_impressions_unique")
-        impressions = safe_get(insights, "post_impressions")
+        reach = safe_get(insights, "post_total_media_view_unique")
+        impressions = safe_get(insights, "post_media_view")
         engagements = safe_get(insights, "post_engaged_users")
         clicks = safe_get(insights, "post_clicks")
         eng_rate = round((engagements / reach * 100), 2) if reach else 0
@@ -196,7 +216,7 @@ def main():
         post_rows.append([
             str(week_start), "Facebook", post["id"],
             post.get("created_time", "")[:10], post_type, caption,
-            reach, impressions, "", "", "", "", "",  # likes/comments etc limited on FB
+            reach, impressions, "", "", "", "", "",
             eng_rate, clicks, post.get("permalink_url", "")
         ])
 
