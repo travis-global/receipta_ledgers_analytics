@@ -55,28 +55,40 @@ def get_page_insights(since, until):
         return []
 
 def get_ig_account_insights(since, until):
-    """
-    Instagram requires metric_type=total_value for most modern metrics.
-    We request only the most reliable ones.
-    """
+    results = []
+
+    # Metrics that work with metric_type=total_value
     try:
         data = graph_get(
             f"{IG_USER_ID}/insights",
             {
-                "metric": "reach,follower_count,profile_views,total_interactions",
+                "metric": "reach,profile_views,total_interactions",
                 "period": "day",
                 "metric_type": "total_value",
                 "since": since.strftime("%Y-%m-%d"),
                 "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
             },
         )
-        return data.get("data", [])
+        results.extend(data.get("data", []))
     except Exception as e:
-        print(f"Instagram account insights error: {e}")
-        if hasattr(e, "response") and e.response is not None:
-            print("Response:", e.response.text)
-        return []
+        print(f"IG total_value metrics error: {e}")
 
+    # follower_count works better without metric_type or with time_series
+    try:
+        data = graph_get(
+            f"{IG_USER_ID}/insights",
+            {
+                "metric": "follower_count",
+                "period": "day",
+                "since": since.strftime("%Y-%m-%d"),
+                "until": (until + timedelta(days=1)).strftime("%Y-%m-%d"),
+            },
+        )
+        results.extend(data.get("data", []))
+    except Exception as e:
+        print(f"IG follower_count error: {e}")
+
+    return results
 def get_fb_posts(since, until):
     try:
         data = graph_get(
